@@ -1,284 +1,202 @@
-function IT8812C_DataLogger()
-% IT8812C电子负载数据采集程序
-% 功能：CC模式下以10Hz采样电压、电流、功率60秒，实时绘图并导出CSV
+%% IT8812C 电子负载控制程序
+clear all; close all; clc;
 
-clc; clear; close all;
+%% 1. 建立USB连接
+% 查找USB设备
+visaInfo = visadevlist;
+disp('可用的VISA设备：');
+disp(visaInfo);
 
-%% 配置参数
-SAMPLE_RATE = 10;           % 采样频率 10Hz
-SAMPLE_TIME = 60;           % 采样时间 60秒
-SAMPLE_INTERVAL = 1/SAMPLE_RATE; % 采样间隔 0.1秒
-TOTAL_SAMPLES = SAMPLE_RATE * SAMPLE_TIME; % 总采样点数 600
+usbAddress = 'USB0::0x1AB1::0x0E11::0::INSTR';
 
-% 设置CC模式参数
-CC_CURRENT = 1.0;           % 设定电流值 1A (请根据实际需求修改)
-
-%% 查找并连接USB设备
 try
-    % 查找USB TMC设备
-    devices = instrhwinfo('visa');
-    usb_devices = {};
-    
-    if ~isempty(devices.ObjectConstructorName)
-        for i = 1:length(devices.ObjectConstructorName)
-            if contains(devices.ObjectConstructorName{i}, 'USB')
-                usb_devices{end+1} = devices.ObjectConstructorName{i}{2};
-            end
-        end
-    end
-    
-    if isempty(usb_devices)
-        error('未找到USB设备，请检查IT8812C是否正确连接');
-    end
-    
-    % 显示找到的设备
-    fprintf('找到以下USB设备:\n');
-    for i = 1:length(usb_devices)
-        fprintf('%d: %s\n', i, usb_devices{i});
-    end
-    
-    % 选择设备（如果有多个设备）
-    if length(usb_devices) == 1
-        selected_device = usb_devices{1};
-    else
-        device_idx = input('请选择设备编号: ');
-        selected_device = usb_devices{device_idx};
-    end
-    
     % 创建VISA对象
-    load_instrument = visa('ni', selected_device);
+    load_device = visadev(usbAddress);
     
-    % 配置通信参数
-    load_instrument.Timeout = 5;
-    load_instrument.InputBufferSize = 1024;
-    load_instrument.OutputBufferSize = 1024;
+    % 设置通信参数
+    load_device.Timeout = 5; % 5秒超时
     
-    % 打开连接
-    fopen(load_instrument);
-    fprintf('成功连接到设备: %s\n', selected_device);
+    % 测试连接
+    writeline(load_device, '*IDN?');
+    device_info = readline(load_device);
+    fprintf('连接成功！设备信息：%s\n', device_info);
     
 catch ME
-    error('连接设备失败: %s', ME.message);
+    error('无法连接到设备，请检查USB连接和地址设置');
 end
 
-%% 初始化设备
+%% 2. 配置电子负载
 try
-    % 查询设备信息
-    fprintf(load_instrument, '*IDN?');
-    device_info = fscanf(load_instrument);
-    fprintf('设备信息: %s\n', device_info);
-    
-    % 重置设备
-    fprintf(load_instrument, '*RST');
+    % 复位设备
+    writeline(load_device, '*RST');
     pause(1);
     
-    % 设置CC模式
-    fprintf(load_instrument, 'FUNC CURR');
-    fprintf('设置为CC模式\n');
+    % 设置为CC模式（恒流模式）
+    writeline(load_device, 'FUNC CURR');
+    pause(0.1);
     
-    % 设置电流值
-    fprintf(load_instrument, sprintf('CURR %.3f', CC_CURRENT));
-    fprintf('设置电流值: %.3fA\n', CC_CURRENT);
+    % 设置电流值（请根据实际需要修改，单位：A）
+    current_setpoint = 1.0; % 1A，请根据实际需要修改
+    writeline(load_device, sprintf('CURR %f', current_setpoint));
+    pause(0.1);
     
-    % 查询当前设置确认
-    fprintf(load_instrument, 'FUNC?');
-    mode = strtrim(fscanf(load_instrument));
-    fprintf('当前模式: %s\n', mode);
+    % 设置电流量程（可选，根据需要设置）
+    % writeline(load_device, 'CURR:RANG 10'); % 设置10A量程
     
-    fprintf(load_instrument, 'CURR?');
-    current_setting = str2double(fscanf(load_instrument));
-    fprintf('当前电流设置: %.3fA\n', current_setting);
+    % 打开输入
+    writeline(load_device, 'INP ON');
+    pause(0.5);
+    
+    fprintf('电子负载配置完成！\n');
+    fprintf('模式：CC (恒流)\n');
+    fprintf('设定电流：%.3f A\n', current_setpoint);
     
 catch ME
-    fclose(load_instrument);
-    delete(load_instrument);
-    error('设备初始化失败: %s', ME.message);
+    error('配置设备失败：%s', ME.message);
 end
 
-%% 数据采集准备
+%% 3. 数据采集设置
+sample_rate = 10; % Hz
+duration = 60; % 秒
+num_samples = sample_rate * duration;
+
 % 预分配数据数组
-time_data = zeros(TOTAL_SAMPLES, 1);
-voltage_data = zeros(TOTAL_SAMPLES, 1);
-current_data = zeros(TOTAL_SAMPLES, 1);
-power_data = zeros(TOTAL_SAMPLES, 1);
+time_data = zeros(num_samples, 1);
+voltage_data = zeros(num_samples, 1);
+current_data = zeros(num_samples, 1);
+power_data = zeros(num_samples, 1);
 
 % 创建实时绘图窗口
 figure('Name', 'IT8812C 实时数据监控', 'Position', [100, 100, 1200, 800]);
 
-% 子图1: 电压
-subplot(3,1,1);
+% 电压子图
+subplot(3, 1, 1);
 h_voltage = plot(0, 0, 'b-', 'LineWidth', 1.5);
-grid on;
 xlabel('时间 (s)');
 ylabel('电压 (V)');
-title('电压实时监控');
-voltage_ax = gca;
-
-% 子图2: 电流
-subplot(3,1,2);
-h_current = plot(0, 0, 'r-', 'LineWidth', 1.5);
+title('电压实时曲线');
 grid on;
+xlim([0 duration]);
+ylim('auto');
+
+% 电流子图
+subplot(3, 1, 2);
+h_current = plot(0, 0, 'r-', 'LineWidth', 1.5);
 xlabel('时间 (s)');
 ylabel('电流 (A)');
-title('电流实时监控');
-current_ax = gca;
-
-% 子图3: 功率
-subplot(3,1,3);
-h_power = plot(0, 0, 'g-', 'LineWidth', 1.5);
+title('电流实时曲线');
 grid on;
+xlim([0 duration]);
+ylim('auto');
+
+% 功率子图
+subplot(3, 1, 3);
+h_power = plot(0, 0, 'g-', 'LineWidth', 1.5);
 xlabel('时间 (s)');
 ylabel('功率 (W)');
-title('功率实时监控');
-power_ax = gca;
+title('功率实时曲线');
+grid on;
+xlim([0 duration]);
+ylim('auto');
 
-%% 开始数据采集
+%% 4. 开始数据采集
 fprintf('\n开始数据采集...\n');
-fprintf('采样频率: %dHz, 采样时间: %ds\n', SAMPLE_RATE, SAMPLE_TIME);
+fprintf('采样率：%d Hz\n', sample_rate);
+fprintf('持续时间：%d 秒\n', duration);
+fprintf('总采样点数：%d\n', num_samples);
+fprintf('\n按 Ctrl+C 可提前终止采集\n\n');
 
-% 提示用户是否开启负载输入
-user_input = input('是否开启负载输入? (y/n): ', 's');
-if strcmpi(user_input, 'y')
-    fprintf(load_instrument, 'INP ON');
-    fprintf('负载输入已开启\n');
-    input_enabled = true;
-else
-    fprintf('负载输入保持关闭状态\n');
-    input_enabled = false;
-end
-
-% 开始计时
+% 记录开始时间
 start_time = tic;
-last_sample_time = 0;
+sample_period = 1/sample_rate;
 
 try
-    for i = 1:TOTAL_SAMPLES
-        % 等待到下一个采样点
+    for i = 1:num_samples
+        % 记录时间戳
         current_time = toc(start_time);
-        expected_time = (i-1) * SAMPLE_INTERVAL;
+        time_data(i) = current_time;
         
-        if current_time < expected_time
-            pause(expected_time - current_time);
-        end
+        % 读取电压
+        writeline(load_device, 'MEAS:VOLT?');
+        voltage_str = readline(load_device);
+        voltage_data(i) = str2double(voltage_str);
         
-        % 读取测量值
-        fprintf(load_instrument, 'MEAS:VOLT?');
-        voltage = str2double(fscanf(load_instrument));
+        % 读取电流
+        writeline(load_device, 'MEAS:CURR?');
+        current_str = readline(load_device);
+        current_data(i) = str2double(current_str);
         
-        fprintf(load_instrument, 'MEAS:CURR?');
-        current = str2double(fscanf(load_instrument));
+        % 读取功率
+        writeline(load_device, 'FETC:POW?');
+        power_str = readline(load_device);
+        power_data(i) = str2double(power_str);
         
-        fprintf(load_instrument, 'FETC:POW?');
-        power = str2double(fscanf(load_instrument));
-        
-        % 存储数据
-        time_data(i) = toc(start_time);
-        voltage_data(i) = voltage;
-        current_data(i) = current;
-        power_data(i) = power;
-        
-        % 更新实时绘图
-        if mod(i, 5) == 0 % 每5个点更新一次图形以提高性能
-            % 更新电压图
+        % 更新实时图形
+        if mod(i, 5) == 0 % 每5个点更新一次图形，提高效率
             set(h_voltage, 'XData', time_data(1:i), 'YData', voltage_data(1:i));
-            set(voltage_ax, 'XLim', [max(0, time_data(i)-10), time_data(i)+1]);
-            
-            % 更新电流图
             set(h_current, 'XData', time_data(1:i), 'YData', current_data(1:i));
-            set(current_ax, 'XLim', [max(0, time_data(i)-10), time_data(i)+1]);
-            
-            % 更新功率图
             set(h_power, 'XData', time_data(1:i), 'YData', power_data(1:i));
-            set(power_ax, 'XLim', [max(0, time_data(i)-10), time_data(i)+1]);
+            
+            % 动态调整Y轴范围
+            subplot(3, 1, 1);
+            ylim('auto');
+            subplot(3, 1, 2);
+            ylim('auto');
+            subplot(3, 1, 3);
+            ylim('auto');
             
             drawnow;
         end
         
         % 显示进度
-        if mod(i, 50) == 0 % 每5秒显示一次进度
-            progress = i / TOTAL_SAMPLES * 100;
-            fprintf('采集进度: %.1f%% | V=%.3fV, I=%.3fA, P=%.3fW\n', ...
-                    progress, voltage, current, power);
+        if mod(i, sample_rate) == 0
+            fprintf('已采集 %d/%d 秒...\n', round(current_time), duration);
+        end
+        
+        % 等待到下一个采样时刻
+        while toc(start_time) < (i * sample_period)
+            % 空循环等待
         end
     end
     
+    fprintf('\n数据采集完成！\n');
+    
 catch ME
-    fprintf('数据采集中断: %s\n', ME.message);
+    fprintf('\n数据采集被中断！\n');
+    % 截取已采集的数据
+    actual_samples = i - 1;
+    time_data = time_data(1:actual_samples);
+    voltage_data = voltage_data(1:actual_samples);
+    current_data = current_data(1:actual_samples);
+    power_data = power_data(1:actual_samples);
 end
 
-%% 关闭设备输入
-if input_enabled
-    fprintf(load_instrument, 'INP OFF');
-    fprintf('负载输入已关闭\n');
-end
+%% 5. 关闭输入
+writeline(load_device, 'INP OFF');
+fprintf('已关闭电子负载输入\n');
 
-%% 数据处理和导出
-fprintf('\n数据采集完成！\n');
-
-% 计算统计数据
-avg_voltage = mean(voltage_data);
-avg_current = mean(current_data);
-avg_power = mean(power_data);
-max_voltage = max(voltage_data);
-max_current = max(current_data);
-max_power = max(power_data);
-min_voltage = min(voltage_data);
-min_current = min(current_data);
-min_power = min(power_data);
-
-fprintf('\n=== 数据统计 ===\n');
-fprintf('电压: 平均=%.3fV, 最大=%.3fV, 最小=%.3fV\n', avg_voltage, max_voltage, min_voltage);
-fprintf('电流: 平均=%.3fA, 最大=%.3fA, 最小=%.3fA\n', avg_current, max_current, min_current);
-fprintf('功率: 平均=%.3fW, 最大=%.3fW, 最小=%.3fW\n', avg_power, max_power, min_power);
+%% 6. 数据导出为CSV
+% 创建数据表
+data_table = table(time_data, voltage_data, current_data, power_data, ...
+    'VariableNames', {'Time_s', 'Voltage_V', 'Current_A', 'Power_W'});
 
 % 生成文件名（包含时间戳）
 timestamp = datestr(now, 'yyyymmdd_HHMMSS');
 filename = sprintf('IT8812C_Data_%s.csv', timestamp);
 
-% 创建数据表
-data_table = table(time_data, voltage_data, current_data, power_data, ...
-                   'VariableNames', {'Time_s', 'Voltage_V', 'Current_A', 'Power_W'});
+% 保存为CSV文件
+writetable(data_table, filename);
+fprintf('\n数据已保存至：%s\n', filename);
 
-% 导出CSV文件
-try
-    writetable(data_table, filename);
-    fprintf('数据已导出到: %s\n', filename);
-catch ME
-    fprintf('导出文件失败: %s\n', ME.message);
-    
-    % 尝试保存到工作区
-    save(sprintf('IT8812C_Data_%s.mat', timestamp), 'time_data', 'voltage_data', 'current_data', 'power_data');
-    fprintf('数据已保存为MAT文件\n');
-end
+%% 7. 计算并显示统计信息
+fprintf('\n=== 数据统计 ===\n');
+fprintf('电压 - 平均值：%.3f V, 最大值：%.3f V, 最小值：%.3f V\n', ...
+    mean(voltage_data), max(voltage_data), min(voltage_data));
+fprintf('电流 - 平均值：%.3f A, 最大值：%.3f A, 最小值：%.3f A\n', ...
+    mean(current_data), max(current_data), min(current_data));
+fprintf('功率 - 平均值：%.3f W, 最大值：%.3f W, 最小值：%.3f W\n', ...
+    mean(power_data), max(power_data), min(power_data));
 
-%% 最终绘图更新
-% 更新完整数据图
-set(h_voltage, 'XData', time_data, 'YData', voltage_data);
-set(voltage_ax, 'XLim', [0, max(time_data)]);
-
-set(h_current, 'XData', time_data, 'YData', current_data);
-set(current_ax, 'XLim', [0, max(time_data)]);
-
-set(h_power, 'XData', time_data, 'YData', power_data);
-set(power_ax, 'XLim', [0, max(time_data)]);
-
-% 保存图像
-try
-    saveas(gcf, sprintf('IT8812C_Plot_%s.png', timestamp));
-    fprintf('图像已保存\n');
-catch
-    fprintf('保存图像失败\n');
-end
-
-%% 清理资源
-try
-    fclose(load_instrument);
-    delete(load_instrument);
-    fprintf('设备连接已关闭\n');
-catch
-    fprintf('关闭设备连接时出错\n');
-end
-
-fprintf('\n程序执行完成！\n');
-
-end
+%% 8. 清理资源
+clear load_device;
+fprintf('\n程序执行完毕！\n');
